@@ -702,6 +702,23 @@ static void infowrite(int pos, const char* txt)
 	OsdWrite(pos, str, 0, 0);
 }
 
+static const char* getTimeStr(bool hasMs = true)
+{
+	static char buffer[64];
+	*buffer = 0;
+	time_t t = time(NULL);
+	struct tm tm = *localtime(&t);
+	if (tm.tm_year >= 117)
+	{
+		strftime(
+			buffer, sizeof(buffer),
+			hasMs ? "%b %d %a%H:%M:%S" : "%b %d %a%H:%M",
+			&tm);
+		buffer[9] = ' ';
+	}
+	return buffer;
+}
+
 static void printSysInfo()
 {
 	if (!sysinfo_timer || CheckTimer(sysinfo_timer))
@@ -709,9 +726,10 @@ static void printSysInfo()
 		sysinfo_timer = GetTimer(2000);
 		struct battery_data_t bat;
 		int hasbat = getBattery(0, &bat);
-		int n = 3;
+		char isMenu = is_menu();
+		int n = isMenu ? 3 : ((hasbat) ? 2 : 3);
 
-		char str[40];
+		char str[64];
 		OsdWrite(n++, info_top, 0, 0);
 		if (!hasbat)
 		{
@@ -736,6 +754,19 @@ static void printSysInfo()
 		}
 		if (!j) infowrite(n++, "No network");
 		if (j<2) infowrite(n++, "");
+
+		if (!isMenu)
+		{
+			// sysinfo refreshes once per 2 sec
+			// so hide seconds in time string :)
+			snprintf(str, sizeof(str), "Time: %s",
+					 getTimeStr(false));
+			infowrite(n++, str);
+			if (hasbat)
+			{
+				infowrite(n++, "");
+			}
+		}
 
 		if (hasbat)
 		{
