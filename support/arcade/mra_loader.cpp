@@ -4,7 +4,6 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <ctype.h>
-#include <sys/mman.h>
 
 #include "../../sxmlc.h"
 #include "../../user_io.h"
@@ -13,6 +12,7 @@
 #include "../../menu.h"
 #include "../../fpga_io.h"
 #include "../../lib/md5/md5.h"
+#include "../../shmem.h"
 
 #include "buffer.h"
 #include "mra_loader.h"
@@ -216,34 +216,46 @@ static int rom_checksz(int idx, int chunk)
 
 static int rom_data(const uint8_t *buf, int chunk, int map, struct MD5Context *md5context)
 {
+	uint8_t offsets[8]; // assert (unitlen <= 8)
+	int bytes_in_iter = 0;
+
 	if (md5context) MD5Update(md5context, buf, chunk);
 
 	int idx = 0;
 	if (!map) map = 1;
 
-	for (int i = 0; i<unitlen; i++)
+	int map_reg = map;
+	for (int i = 0; i < unitlen; i++)
 	{
-		if (((map >> (i * 4)) & 0xF)) break;
+		if (map_reg & 0xf)
+			break;
+		map_reg >>= 4;
 		idx++;
 	}
 
-	if (idx >= unitlen) return 0; // illegal map
-	if (!rom_checksz(idx, chunk*unitlen)) return 0;
+	if (idx >= unitlen)
+		return 0; // illegal map
+	if (!rom_checksz(idx, chunk*unitlen))
+		return 0;
+
+	map_reg = map;
+	for (int i = 0; i < unitlen; i++)
+	{
+		if (map_reg & 0xf)
+		{
+			offsets[bytes_in_iter] = idx + (map_reg & 0xf) - 1;
+			bytes_in_iter++;
+		}
+		map_reg >>= 4;
+	}
 
 	while (chunk)
 	{
-		for (int ord = 1; ord <= unitlen; ord++)
+		for (int i = 0; i < bytes_in_iter; i++)
 		{
-			for (int i = 0; (i < unitlen && chunk); i++)
-			{
-				if (((map >> (i * 4)) & 0xF) == ord)
-				{
-					*(romdata + romlen[idx] + i) = *buf++;
-					chunk--;
-				}
-			}
+			*(romdata + romlen[idx] + offsets[i]) = *buf++;
+			chunk--;
 		}
-
 		romlen[idx] += unitlen;
 	}
 
@@ -292,33 +304,6 @@ static int rom_patch(const uint8_t *buf, int offset, uint16_t len, int dataop)
 	return 1;
 }
 
-static void send_to_ddr(uint32_t address, void* buf, uint32_t len)
-{
-	int memfd = open("/dev/mem", O_RDWR | O_SYNC);
-	if (memfd == -1)
-	{
-		printf("Unable to open /dev/mem!\n");
-		return;
-	}
-
-	//make sure it's in FPGA address space
-	uint32_t map_addr = 0x20000000 | address;
-
-	void *base = mmap(0, len, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, map_addr);
-	if (base == (void *)-1)
-	{
-		printf("Unable to mmap (0x%X, %d)!\n", map_addr, len);
-		close(memfd);
-		return;
-	}
-
-	memcpy(base, buf, len);
-	munmap(base, len);
-
-	close(memfd);
-	return;
-}
-
 static void rom_finish(int send, uint32_t address, int index)
 {
 	if (romlen[0] && romdata)
@@ -336,7 +321,7 @@ static void rom_finish(int send, uint32_t address, int index)
 
 			if (address)
 			{
-				send_to_ddr(address, data, len);
+				shmem_put(fpga_mem(address), len, data);
 			}
 			else
 			{
